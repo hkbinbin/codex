@@ -151,6 +151,8 @@ impl RemoteExecServerConnectArgs {
             connect_timeout: CONNECT_TIMEOUT,
             initialize_timeout: INITIALIZE_TIMEOUT,
             resume_session_id: None,
+            auth_token: None,
+            tls_pinned_sha256: None,
         }
     }
 }
@@ -1918,6 +1920,8 @@ mod tests {
             websocket_url,
             connect_timeout: Duration::from_secs(1),
             initialize_timeout: Duration::from_secs(1),
+            auth_token: None,
+            tls_pinned_sha256: None,
         });
         let stable_client = client.get().await.expect("client should connect");
         timeout(Duration::from_secs(1), resumed_rx)
@@ -2025,6 +2029,8 @@ mod tests {
             websocket_url,
             connect_timeout: Duration::from_secs(1),
             initialize_timeout: Duration::from_secs(1),
+            auth_token: None,
+            tls_pinned_sha256: None,
         });
         let stable_client = client.get().await.expect("client should connect");
         let session = stable_client
@@ -2120,6 +2126,8 @@ mod tests {
                 connect_timeout: Duration::from_secs(1),
                 initialize_timeout: Duration::from_secs(1),
                 resume_session_id: Some("session-1".to_string()),
+                auth_token: None,
+                tls_pinned_sha256: None,
             }),
         )
         .await
@@ -2160,6 +2168,8 @@ mod tests {
             websocket_url,
             connect_timeout: Duration::from_secs(1),
             initialize_timeout: Duration::from_secs(1),
+            auth_token: None,
+            tls_pinned_sha256: None,
         });
 
         assert!(!client.startup_finished());
@@ -2269,6 +2279,8 @@ mod tests {
             websocket_url,
             connect_timeout: Duration::from_secs(1),
             initialize_timeout: Duration::from_secs(1),
+            auth_token: None,
+            tls_pinned_sha256: None,
         });
 
         let initial = client.get().await.expect("startup should connect");

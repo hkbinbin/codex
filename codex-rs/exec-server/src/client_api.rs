@@ -31,6 +31,15 @@ pub struct RemoteExecServerConnectArgs {
     pub connect_timeout: Duration,
     pub initialize_timeout: Duration,
     pub resume_session_id: Option<String>,
+    /// Optional bearer token sent as `Authorization: Bearer <token>` when
+    /// opening the WebSocket connection. Used to authenticate against a
+    /// token-protected exec-server (see `CODEX_EXEC_SERVER_AUTH_TOKEN`).
+    pub auth_token: Option<String>,
+    /// Optional SHA-256 fingerprint (32 bytes) of the server's TLS certificate.
+    /// When set and the URL uses `wss://`, the client pins this certificate
+    /// instead of validating against system roots, enabling self-signed,
+    /// reverse-proxy-free end-to-end encryption.
+    pub tls_pinned_sha256: Option<[u8; 32]>,
 }
 
 /// Registry-authorized material for one Noise rendezvous connection attempt.
@@ -95,6 +104,8 @@ pub(crate) enum ExecServerTransportParams {
         websocket_url: String,
         connect_timeout: Duration,
         initialize_timeout: Duration,
+        auth_token: Option<String>,
+        tls_pinned_sha256: Option<[u8; 32]>,
     },
     NoiseRendezvous {
         provider: Arc<dyn NoiseRendezvousConnectProvider>,
@@ -114,11 +125,15 @@ impl std::fmt::Debug for ExecServerTransportParams {
                 websocket_url,
                 connect_timeout,
                 initialize_timeout,
+                auth_token,
+                tls_pinned_sha256,
             } => f
                 .debug_struct("WebSocketUrl")
                 .field("websocket_url", websocket_url)
                 .field("connect_timeout", connect_timeout)
                 .field("initialize_timeout", initialize_timeout)
+                .field("auth_token", &auth_token.as_ref().map(|_| "<redacted>"))
+                .field("tls_pinned", &tls_pinned_sha256.is_some())
                 .finish(),
             Self::NoiseRendezvous { .. } => {
                 f.debug_struct("NoiseRendezvous").finish_non_exhaustive()
@@ -136,11 +151,18 @@ impl std::fmt::Debug for ExecServerTransportParams {
 }
 
 impl ExecServerTransportParams {
-    pub(crate) fn websocket_url(websocket_url: String, connect_timeout: Duration) -> Self {
+    pub(crate) fn websocket_url_with_auth(
+        websocket_url: String,
+        connect_timeout: Duration,
+        auth_token: Option<String>,
+        tls_pinned_sha256: Option<[u8; 32]>,
+    ) -> Self {
         Self::WebSocketUrl {
             websocket_url,
             connect_timeout,
             initialize_timeout: DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT,
+            auth_token,
+            tls_pinned_sha256,
         }
     }
 }

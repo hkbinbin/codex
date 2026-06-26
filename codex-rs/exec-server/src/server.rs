@@ -8,6 +8,7 @@ mod transport;
 
 pub(crate) use handler::ExecServerHandler;
 pub(crate) use processor::ConnectionProcessor;
+pub use transport::CODEX_EXEC_SERVER_AUTH_TOKEN_ENV_VAR;
 pub use transport::DEFAULT_LISTEN_URL;
 pub use transport::ExecServerListenUrlParseError;
 

@@ -1274,3 +1274,179 @@ fn long_running_command() -> Vec<String> {
         "Start-Sleep -Seconds 30".to_string(),
     ]
 }
+
+mod remote_drain {
+    use super::*;
+    use codex_exec_server::ByteChunk;
+    use codex_exec_server::ExecOutputStream;
+    use codex_exec_server::ExecProcess;
+    use codex_exec_server::ExecProcessEventReceiver;
+    use codex_exec_server::ExecProcessFuture;
+    use codex_exec_server::ProcessId;
+    use codex_exec_server::ProcessOutputChunk;
+    use codex_exec_server::ProcessSignal;
+    use codex_exec_server::ReadResponse;
+    use codex_exec_server::WriteResponse;
+    use codex_exec_server::WriteStatus;
+    use pretty_assertions::assert_eq;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use tokio::sync::watch;
+
+    /// A scripted `ExecProcess` that returns a fixed sequence of `ReadResponse`
+    /// values, one per `read` call, to drive `drain_remote_process`.
+    struct ScriptedExecProcess {
+        process_id: ProcessId,
+        responses: Mutex<std::collections::VecDeque<ReadResponse>>,
+        terminated: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ScriptedExecProcess {
+        fn new(responses: Vec<ReadResponse>) -> Arc<Self> {
+            Arc::new(Self {
+                process_id: "test-proc".to_string().into(),
+                responses: Mutex::new(responses.into_iter().collect()),
+                terminated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            })
+        }
+
+        fn next_response(&self) -> ReadResponse {
+            self.responses
+                .lock()
+                .expect("lock responses")
+                .pop_front()
+                .unwrap_or(ReadResponse {
+                    chunks: Vec::new(),
+                    next_seq: 1,
+                    exited: true,
+                    exit_code: Some(0),
+                    closed: true,
+                    failure: None,
+                    sandbox_denied: false,
+                })
+        }
+    }
+
+    impl ExecProcess for ScriptedExecProcess {
+        fn process_id(&self) -> &ProcessId {
+            &self.process_id
+        }
+
+        fn subscribe_wake(&self) -> watch::Receiver<u64> {
+            let (_tx, rx) = watch::channel(0);
+            rx
+        }
+
+        fn subscribe_events(&self) -> ExecProcessEventReceiver {
+            ExecProcessEventReceiver::empty()
+        }
+
+        fn read(
+            &self,
+            _after_seq: Option<u64>,
+            _max_bytes: Option<usize>,
+            _wait_ms: Option<u64>,
+        ) -> ExecProcessFuture<'_, ReadResponse> {
+            let response = self.next_response();
+            Box::pin(async move { Ok(response) })
+        }
+
+        fn write(&self, _chunk: Vec<u8>) -> ExecProcessFuture<'_, WriteResponse> {
+            Box::pin(async {
+                Ok(WriteResponse {
+                    status: WriteStatus::Accepted,
+                })
+            })
+        }
+
+        fn signal(&self, _signal: ProcessSignal) -> ExecProcessFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn terminate(&self) -> ExecProcessFuture<'_, ()> {
+            self.terminated
+                .store(true, std::sync::atomic::Ordering::Release);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn chunk(seq: u64, stream: ExecOutputStream, bytes: &[u8]) -> ProcessOutputChunk {
+        ProcessOutputChunk {
+            seq,
+            stream,
+            chunk: ByteChunk::from(bytes.to_vec()),
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_splits_stdout_and_stderr_and_captures_exit_code() {
+        let process = ScriptedExecProcess::new(vec![
+            ReadResponse {
+                chunks: vec![
+                    chunk(1, ExecOutputStream::Stdout, b"out1"),
+                    chunk(2, ExecOutputStream::Stderr, b"err1"),
+                ],
+                next_seq: 3,
+                exited: false,
+                exit_code: None,
+                closed: false,
+                failure: None,
+                sandbox_denied: false,
+            },
+            ReadResponse {
+                chunks: vec![chunk(3, ExecOutputStream::Stdout, b"out2")],
+                next_seq: 4,
+                exited: true,
+                exit_code: Some(7),
+                closed: true,
+                failure: None,
+                sandbox_denied: false,
+            },
+        ]);
+
+        let raw = drain_remote_process(process.as_ref(), ExecCapturePolicy::ShellTool, None)
+            .await
+            .expect("drain should succeed");
+
+        assert_eq!(raw.stdout.text, b"out1out2");
+        assert_eq!(raw.stderr.text, b"err1");
+        assert_eq!(raw.exit_status.code(), Some(7));
+        assert!(!raw.timed_out);
+    }
+
+    #[tokio::test]
+    async fn drain_propagates_failure_as_error() {
+        let process = ScriptedExecProcess::new(vec![ReadResponse {
+            chunks: Vec::new(),
+            next_seq: 1,
+            exited: false,
+            exit_code: None,
+            closed: false,
+            failure: Some("boom".to_string()),
+            sandbox_denied: false,
+        }]);
+
+        let result =
+            drain_remote_process(process.as_ref(), ExecCapturePolicy::ShellTool, None).await;
+        assert!(result.is_err(), "failure should map to an error");
+    }
+
+    #[tokio::test]
+    async fn pty_stream_bytes_are_treated_as_stdout() {
+        let process = ScriptedExecProcess::new(vec![ReadResponse {
+            chunks: vec![chunk(1, ExecOutputStream::Pty, b"ptyout")],
+            next_seq: 2,
+            exited: true,
+            exit_code: Some(0),
+            closed: true,
+            failure: None,
+            sandbox_denied: false,
+        }]);
+
+        let raw = drain_remote_process(process.as_ref(), ExecCapturePolicy::ShellTool, None)
+            .await
+            .expect("drain should succeed");
+        assert_eq!(raw.stdout.text, b"ptyout");
+        assert!(raw.stderr.text.is_empty());
+    }
+}

@@ -504,6 +504,240 @@ pub(crate) async fn execute_exec_request(
     finalize_exec_result(raw_output_result, sandbox, duration)
 }
 
+/// Polling window (ms) for each `read` while draining a remote exec process.
+/// A bounded window keeps the timeout/cancellation `select!` responsive while
+/// still letting each read block until new output or process exit arrives.
+const REMOTE_DRAIN_POLL_WAIT_MS: u64 = 500;
+
+/// Executes a one-shot command on a remote exec-server environment and drains
+/// its output to a complete [`ExecToolCallOutput`].
+///
+/// This is the remote counterpart to [`execute_env`](crate::sandboxing::execute_env)
+/// for the classic `shell_command` tool: instead of spawning a local child
+/// process, it starts the command on the exec-server (via the environment's
+/// [`ExecBackend`](codex_exec_server::ExecBackend)), reads stdout/stderr chunks
+/// until the remote process closes, and assembles the same output structure the
+/// local path produces (reusing [`finalize_exec_result`] for timeout/sandbox
+/// semantics).
+///
+/// Sandbox enforcement happens on the exec-server side; here `sandbox` is always
+/// reported as [`SandboxType::None`] to `finalize_exec_result` because the local
+/// host did not wrap the command.
+///
+/// When the `expiration` elapses (timeout or cancellation), the remote process
+/// is terminated and the result is finalized as a timeout.
+pub(crate) async fn execute_remote_exec_request(
+    environment: &codex_exec_server::Environment,
+    exec_request: ExecRequest,
+    process_id: i32,
+    stdout_stream: Option<StdoutStream>,
+) -> Result<ExecToolCallOutput> {
+    let expiration = exec_request.expiration.clone();
+    let capture_policy = exec_request.capture_policy;
+    let params = crate::unified_exec::exec_server_params_for_request(
+        process_id,
+        &exec_request,
+        /*tty*/ false,
+    );
+
+    let start = Instant::now();
+    let started = environment
+        .get_exec_backend()
+        .start(params)
+        .await
+        .map_err(|err| {
+            CodexErr::Io(io::Error::other(format!(
+                "failed to start remote exec process: {err}"
+            )))
+        })?;
+    let process = started.process;
+
+    let drain = drain_remote_process(process.as_ref(), capture_policy, stdout_stream.as_ref());
+
+    let raw_output_result = tokio::select! {
+        biased;
+        result = drain => result,
+        _ = expiration.wait_with_outcome() => {
+            // Best-effort terminate, then collect whatever output is buffered.
+            let _ = process.terminate().await;
+            collect_remote_residual(process.as_ref(), capture_policy).await
+        }
+    };
+
+    let duration = start.elapsed();
+    // The local host applied no sandbox wrapper for remote execution, so report
+    // SandboxType::None; the exec-server enforced any sandbox policy itself.
+    finalize_exec_result(raw_output_result, SandboxType::None, duration)
+}
+
+/// Accumulated stdout/stderr for a remote drain, capped to the capture policy's
+/// retained-bytes limit (mirrors the local `consume_output` cap behavior).
+struct RemoteDrainBuffers {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    max_bytes: Option<usize>,
+    exit_code: Option<i32>,
+}
+
+impl RemoteDrainBuffers {
+    fn new(capture_policy: ExecCapturePolicy) -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            max_bytes: capture_policy.retained_bytes_cap(),
+            exit_code: None,
+        }
+    }
+
+    fn push(&mut self, stream: codex_exec_server::ExecOutputStream, bytes: &[u8]) {
+        let target = match stream {
+            codex_exec_server::ExecOutputStream::Stderr => &mut self.stderr,
+            // Non-tty stdout, plus any PTY-merged bytes, are treated as stdout.
+            codex_exec_server::ExecOutputStream::Stdout
+            | codex_exec_server::ExecOutputStream::Pty => &mut self.stdout,
+        };
+        match self.max_bytes {
+            Some(max_bytes) => append_capped(target, bytes, max_bytes),
+            None => target.extend_from_slice(bytes),
+        }
+    }
+
+    fn into_raw(self, timed_out: bool) -> RawExecToolCallOutput {
+        let stdout = StreamOutput {
+            text: self.stdout,
+            truncated_after_lines: None,
+        };
+        let stderr = StreamOutput {
+            text: self.stderr,
+            truncated_after_lines: None,
+        };
+        let aggregated_output = aggregate_output(&stdout, &stderr, self.max_bytes);
+        RawExecToolCallOutput {
+            exit_status: synthetic_exit_status(self.exit_code.unwrap_or(-1)),
+            stdout,
+            stderr,
+            aggregated_output,
+            timed_out,
+        }
+    }
+}
+
+/// Reads remote process output until the process closes (or fails), forwarding
+/// optional streaming deltas, and returns the assembled raw output.
+async fn drain_remote_process(
+    process: &dyn codex_exec_server::ExecProcess,
+    capture_policy: ExecCapturePolicy,
+    stdout_stream: Option<&StdoutStream>,
+) -> std::result::Result<RawExecToolCallOutput, CodexErr> {
+    let mut buffers = RemoteDrainBuffers::new(capture_policy);
+    let mut after_seq: Option<u64> = None;
+    let mut emitted_deltas: usize = 0;
+
+    loop {
+        let response = process
+            .read(
+                after_seq,
+                /*max_bytes*/ None,
+                Some(REMOTE_DRAIN_POLL_WAIT_MS),
+            )
+            .await
+            .map_err(|err| {
+                CodexErr::Io(io::Error::other(format!(
+                    "failed to read remote exec output: {err}"
+                )))
+            })?;
+
+        let codex_exec_server::ReadResponse {
+            chunks,
+            next_seq,
+            exited,
+            exit_code,
+            closed,
+            failure,
+            sandbox_denied: _,
+        } = response;
+
+        for chunk in chunks {
+            let stream = chunk.stream;
+            let bytes = chunk.chunk.into_inner();
+            if emitted_deltas < MAX_EXEC_OUTPUT_DELTAS_PER_CALL {
+                maybe_emit_output_delta(stdout_stream, stream, &bytes);
+                emitted_deltas += 1;
+            }
+            buffers.push(stream, &bytes);
+        }
+
+        if exited {
+            buffers.exit_code = exit_code;
+        }
+
+        if let Some(message) = failure {
+            return Err(CodexErr::Io(io::Error::other(format!(
+                "remote exec process failed: {message}"
+            ))));
+        }
+
+        after_seq = next_seq.checked_sub(1);
+
+        if closed {
+            break;
+        }
+    }
+
+    Ok(buffers.into_raw(/*timed_out*/ false))
+}
+
+/// After a timeout/cancellation, performs a final non-blocking read to capture
+/// any residual buffered output before finalizing.
+async fn collect_remote_residual(
+    process: &dyn codex_exec_server::ExecProcess,
+    capture_policy: ExecCapturePolicy,
+) -> std::result::Result<RawExecToolCallOutput, CodexErr> {
+    let mut buffers = RemoteDrainBuffers::new(capture_policy);
+    // One best-effort non-blocking snapshot of whatever is buffered so far.
+    if let Ok(response) = process
+        .read(None, /*max_bytes*/ None, /*wait_ms*/ Some(0))
+        .await
+    {
+        for chunk in response.chunks {
+            let stream = chunk.stream;
+            let bytes = chunk.chunk.into_inner();
+            buffers.push(stream, &bytes);
+        }
+        if response.exited {
+            buffers.exit_code = response.exit_code;
+        }
+    }
+    Ok(buffers.into_raw(/*timed_out*/ true))
+}
+
+/// Forwards a streaming output delta event for the remote path, mirroring the
+/// local `read_output` behavior so UIs receive incremental output.
+fn maybe_emit_output_delta(
+    stdout_stream: Option<&StdoutStream>,
+    stream: codex_exec_server::ExecOutputStream,
+    bytes: &[u8],
+) {
+    let Some(stdout_stream) = stdout_stream else {
+        return;
+    };
+    let protocol_stream = match stream {
+        codex_exec_server::ExecOutputStream::Stderr => ExecOutputStream::Stderr,
+        codex_exec_server::ExecOutputStream::Stdout
+        | codex_exec_server::ExecOutputStream::Pty => ExecOutputStream::Stdout,
+    };
+    let event = Event {
+        id: stdout_stream.sub_id.clone(),
+        msg: EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
+            call_id: stdout_stream.call_id.clone(),
+            stream: protocol_stream,
+            chunk: bytes.to_vec(),
+        }),
+    };
+    let _ = stdout_stream.tx_event.try_send(event);
+}
+
+
 #[allow(clippy::too_many_arguments)]
 async fn get_raw_output_result(
     params: ExecParams,

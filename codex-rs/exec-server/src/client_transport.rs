@@ -7,9 +7,12 @@ use tokio::io::BufReader;
 use tokio::process::Command;
 use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_tls_with_config;
 use tokio_tungstenite::connect_async_with_config;
 use tracing::debug;
 use tracing::warn;
+
+use futures::FutureExt;
 
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
 
@@ -96,6 +99,8 @@ impl ExecServerClient {
                 websocket_url,
                 connect_timeout,
                 initialize_timeout,
+                auth_token,
+                tls_pinned_sha256,
             } => {
                 Self::connect_websocket(RemoteExecServerConnectArgs {
                     websocket_url,
@@ -103,6 +108,8 @@ impl ExecServerClient {
                     connect_timeout,
                     initialize_timeout,
                     resume_session_id: None,
+                    auth_token,
+                    tls_pinned_sha256,
                 })
                 .await
             }
@@ -189,7 +196,25 @@ impl ExecServerClient {
         ensure_rustls_crypto_provider();
         let websocket_url = args.websocket_url.clone();
         let connect_timeout = args.connect_timeout;
-        let (stream, _) = timeout(connect_timeout, connect_async(websocket_url.as_str()))
+        let request = build_websocket_request(&websocket_url, args.auth_token.as_deref())?;
+
+        // When a TLS fingerprint is pinned (wss:// + self-signed cert), connect
+        // through a rustls connector that authenticates the server by its
+        // certificate fingerprint instead of system root CAs. Otherwise fall
+        // back to the default behavior (system roots for wss://, plaintext for
+        // ws://).
+        let connect_future = match args.tls_pinned_sha256 {
+            Some(fingerprint) => {
+                let connector = tokio_tungstenite::Connector::Rustls(
+                    crate::tls::build_pinned_client_config(fingerprint),
+                );
+                connect_async_tls_with_config(request, None, /*disable_nagle*/ false, Some(connector))
+                    .boxed()
+            }
+            None => connect_async(request).boxed(),
+        };
+
+        let (stream, _) = timeout(connect_timeout, connect_future)
             .await
             .map_err(|_| ExecServerError::WebSocketConnectTimeout {
                 url: websocket_url.clone(),
@@ -338,6 +363,37 @@ fn is_rendezvous_harness_url(websocket_url: &str) -> bool {
         .split('&')
         .filter_map(|pair| pair.split_once('='))
         .any(|(key, value)| key == "role" && value == "harness")
+}
+
+/// Builds the WebSocket client handshake request, attaching an
+/// `Authorization: Bearer <token>` header when a token is provided.
+fn build_websocket_request(
+    websocket_url: &str,
+    auth_token: Option<&str>,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, ExecServerError> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let mut request =
+        websocket_url
+            .into_client_request()
+            .map_err(|source| ExecServerError::WebSocketConnect {
+                url: websocket_url.to_string(),
+                source,
+            })?;
+
+    if let Some(token) = auth_token {
+        let header_value = format!("Bearer {token}");
+        let value = http::header::HeaderValue::from_str(&header_value).map_err(|_| {
+            ExecServerError::Protocol(
+                "exec-server auth token contains invalid header characters".to_string(),
+            )
+        })?;
+        request
+            .headers_mut()
+            .insert(http::header::AUTHORIZATION, value);
+    }
+
+    Ok(request)
 }
 
 fn stdio_command_process(stdio_command: &StdioExecServerCommand) -> Command {

@@ -37,9 +37,11 @@ async fn remote_file_system_sends_path_and_sandbox_cwd_uris_without_native_conve
     let (websocket_url, captured_params, server) =
         record_read_file_params(/*expected_requests*/ 2).await;
     let file_system = RemoteFileSystem::new(LazyRemoteExecServerClient::new(
-        ExecServerTransportParams::websocket_url(
+        ExecServerTransportParams::websocket_url_with_auth(
             websocket_url,
             DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
+            None,
+            None,
         ),
     ));
     let paths = vec![

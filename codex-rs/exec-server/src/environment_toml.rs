@@ -156,6 +156,8 @@ fn parse_environment_toml(
                 websocket_url: url,
                 connect_timeout,
                 initialize_timeout,
+                auth_token: crate::environment::auth_token_from_env(),
+                tls_pinned_sha256: crate::environment::tls_pinned_sha256_from_env(),
             }
         }
         (None, Some(program)) => {
@@ -629,6 +631,8 @@ mod tests {
             websocket_url,
             connect_timeout,
             initialize_timeout,
+            auth_token: _,
+            tls_pinned_sha256: _,
         } = &provider.environments[0].1
         else {
             panic!("expected websocket transport");

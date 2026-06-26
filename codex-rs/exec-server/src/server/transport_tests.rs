@@ -15,6 +15,8 @@ use tokio::time::timeout;
 
 use super::DEFAULT_LISTEN_URL;
 use super::ExecServerListenTransport;
+use super::constant_time_eq;
+use super::extract_bearer_token;
 use super::parse_listen_url;
 use super::run_stdio_connection_with_io;
 use crate::ExecServerRuntimePaths;
@@ -126,22 +128,36 @@ fn parse_listen_url_accepts_websocket_url() {
 }
 
 #[test]
+fn parse_listen_url_accepts_secure_websocket_url() {
+    let transport =
+        parse_listen_url("wss://0.0.0.0:8999").expect("secure websocket listen URL should parse");
+    assert_eq!(
+        transport,
+        ExecServerListenTransport::WebSocketTls(
+            "0.0.0.0:8999"
+                .parse::<SocketAddr>()
+                .expect("valid socket address")
+        )
+    );
+}
+
+#[test]
 fn parse_listen_url_rejects_invalid_websocket_url() {
     let err = parse_listen_url("ws://localhost:1234")
         .expect_err("hostname bind address should be rejected");
     assert_eq!(
         err.to_string(),
-        "invalid websocket --listen URL `ws://localhost:1234`; expected `ws://IP:PORT`"
+        "invalid websocket --listen URL `ws://localhost:1234`; expected `ws://IP:PORT` or `wss://IP:PORT`"
     );
 }
 
 #[test]
-fn parse_listen_url_rejects_unsupported_url() {
-    let err =
-        parse_listen_url("http://127.0.0.1:1234").expect_err("unsupported scheme should fail");
+fn parse_listen_url_rejects_invalid_secure_websocket_url() {
+    let err = parse_listen_url("wss://localhost:1234")
+        .expect_err("hostname bind address should be rejected");
     assert_eq!(
         err.to_string(),
-        "unsupported --listen URL `http://127.0.0.1:1234`; expected `ws://IP:PORT` or `stdio`"
+        "invalid websocket --listen URL `wss://localhost:1234`; expected `ws://IP:PORT` or `wss://IP:PORT`"
     );
 }
 
@@ -163,4 +179,33 @@ fn test_runtime_paths() -> ExecServerRuntimePaths {
         /*codex_linux_sandbox_exe*/ None,
     )
     .expect("runtime paths")
+}
+
+#[test]
+fn parse_listen_url_rejects_unsupported_url() {
+    let err =
+        parse_listen_url("http://127.0.0.1:1234").expect_err("unsupported scheme should fail");
+    assert_eq!(
+        err.to_string(),
+        "unsupported --listen URL `http://127.0.0.1:1234`; expected `ws://IP:PORT`, `wss://IP:PORT`, or `stdio`"
+    );
+}
+
+#[test]
+fn extract_bearer_token_handles_prefix_and_casing() {
+    assert_eq!(extract_bearer_token("Bearer secret"), Some("secret"));
+    assert_eq!(extract_bearer_token("bearer secret"), Some("secret"));
+    assert_eq!(extract_bearer_token("Bearer   secret  "), Some("secret"));
+    assert_eq!(extract_bearer_token("Bearer "), None);
+    assert_eq!(extract_bearer_token("Basic secret"), None);
+    assert_eq!(extract_bearer_token("secret"), None);
+}
+
+#[test]
+fn constant_time_eq_matches_only_identical_bytes() {
+    assert!(constant_time_eq(b"token-123", b"token-123"));
+    assert!(!constant_time_eq(b"token-123", b"token-124"));
+    assert!(!constant_time_eq(b"token", b"token-123"));
+    assert!(!constant_time_eq(b"", b"x"));
+    assert!(constant_time_eq(b"", b""));
 }

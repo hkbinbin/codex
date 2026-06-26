@@ -29,6 +29,16 @@ use crate::remote_process::RemoteProcess;
 use tokio_util::task::AbortOnDropHandle;
 
 pub const CODEX_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_EXEC_SERVER_URL";
+/// Bearer token sent on outgoing WebSocket connections to authenticate against
+/// a token-protected exec-server. Mirrors the server-side variable of the same
+/// name (see `server::CODEX_EXEC_SERVER_AUTH_TOKEN_ENV_VAR`).
+pub const CODEX_EXEC_SERVER_AUTH_TOKEN_ENV_VAR: &str = "CODEX_EXEC_SERVER_AUTH_TOKEN";
+/// SHA-256 fingerprint (hex) of the server's TLS certificate to pin when
+/// connecting over `wss://`. When set, the client authenticates the server by
+/// this fingerprint instead of system root CAs, enabling self-signed,
+/// reverse-proxy-free end-to-end encryption.
+pub const CODEX_EXEC_SERVER_TLS_PINNED_SHA256_ENV_VAR: &str =
+    "CODEX_EXEC_SERVER_TLS_PINNED_SHA256";
 pub const CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR: &str =
     "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL";
 pub const CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID_ENV_VAR: &str =
@@ -312,9 +322,11 @@ impl EnvironmentManager {
             ));
         };
         let environment = Arc::new(Environment::remote_with_transport(
-            ExecServerTransportParams::websocket_url(
+            ExecServerTransportParams::websocket_url_with_auth(
                 exec_server_url,
                 connect_timeout.unwrap_or(DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT),
+                auth_token_from_env(),
+                tls_pinned_sha256_from_env(),
             ),
             self.local_runtime_paths.clone(),
         ));
@@ -404,6 +416,30 @@ fn optional_environment_value(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Reads the outgoing bearer token from `CODEX_EXEC_SERVER_AUTH_TOKEN`,
+/// returning `None` when unset or empty.
+pub(crate) fn auth_token_from_env() -> Option<String> {
+    optional_environment_value(CODEX_EXEC_SERVER_AUTH_TOKEN_ENV_VAR)
+}
+
+/// Reads and parses the pinned TLS certificate fingerprint from
+/// `CODEX_EXEC_SERVER_TLS_PINNED_SHA256`. Returns `None` when unset/empty; an
+/// invalid value is logged and treated as unset so that a typo does not silently
+/// disable encryption (the wss:// connection then fails closed against system
+/// roots rather than pinning).
+pub(crate) fn tls_pinned_sha256_from_env() -> Option<[u8; 32]> {
+    let value = optional_environment_value(CODEX_EXEC_SERVER_TLS_PINNED_SHA256_ENV_VAR)?;
+    match crate::tls::parse_fingerprint_hex(&value) {
+        Ok(fingerprint) => Some(fingerprint),
+        Err(error) => {
+            tracing::warn!(
+                "ignoring invalid {CODEX_EXEC_SERVER_TLS_PINNED_SHA256_ENV_VAR}: {error}"
+            );
+            None
+        }
+    }
 }
 
 /// Concrete execution/filesystem environment selected for a session.
@@ -502,9 +538,11 @@ impl Environment {
         local_runtime_paths: Option<ExecServerRuntimePaths>,
     ) -> Self {
         Self::remote_with_transport(
-            ExecServerTransportParams::websocket_url(
+            ExecServerTransportParams::websocket_url_with_auth(
                 exec_server_url,
                 DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
+                auth_token_from_env(),
+                tls_pinned_sha256_from_env(),
             ),
             local_runtime_paths,
         )

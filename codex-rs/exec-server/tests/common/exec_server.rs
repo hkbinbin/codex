@@ -79,6 +79,78 @@ pub(crate) async fn exec_server() -> anyhow::Result<ExecServerHarness> {
     exec_server_with_env(std::iter::empty::<(&str, &str)>()).await
 }
 
+/// Spawns an exec-server child without opening a client WebSocket connection.
+///
+/// Returns the child process (kept alive by the caller) together with the
+/// `ws://` listen URL printed on stdout. Used by authentication tests that need
+/// to control the handshake headers manually (e.g. to assert that a missing or
+/// invalid bearer token is rejected before the WebSocket upgrade).
+pub(crate) async fn spawn_exec_server_url_only<I, K, V>(
+    env: I,
+) -> anyhow::Result<(Child, String, TempDir, TestCodexHelperPaths)>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<std::ffi::OsStr>,
+    V: AsRef<std::ffi::OsStr>,
+{
+    let helper_paths = test_codex_helper_paths()?;
+    let codex_home = TempDir::new()?;
+    let mut child = Command::new(&helper_paths.codex_exe);
+    child.args(["exec-server", "--listen", "ws://127.0.0.1:0"]);
+    child.stdin(Stdio::null());
+    child.stdout(Stdio::piped());
+    child.stderr(Stdio::inherit());
+    child.kill_on_drop(true);
+    child.env("CODEX_HOME", codex_home.path());
+    child.envs(env);
+    let mut child = child.spawn()?;
+
+    let websocket_url = read_listen_url_from_stdout(&mut child).await?;
+    Ok((child, websocket_url, codex_home, helper_paths))
+}
+
+/// Information about a spawned `wss://` exec-server.
+pub(crate) struct SpawnedWssServer {
+    pub child: Child,
+    /// `wss://IP:PORT` URL printed on stdout.
+    pub websocket_url: String,
+    /// Hex-encoded SHA-256 certificate fingerprint printed on stdout
+    /// (`pinned-sha256: ...`), used by clients to pin the self-signed cert.
+    pub fingerprint_hex: String,
+    pub _codex_home: TempDir,
+    pub _helper_paths: TestCodexHelperPaths,
+}
+
+/// Spawns an exec-server listening over `wss://` (TLS with a self-signed cert)
+/// and captures both the listen URL and the certificate fingerprint it prints.
+pub(crate) async fn spawn_exec_server_wss<I, K, V>(env: I) -> anyhow::Result<SpawnedWssServer>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<std::ffi::OsStr>,
+    V: AsRef<std::ffi::OsStr>,
+{
+    let helper_paths = test_codex_helper_paths()?;
+    let codex_home = TempDir::new()?;
+    let mut child = Command::new(&helper_paths.codex_exe);
+    child.args(["exec-server", "--listen", "wss://127.0.0.1:0"]);
+    child.stdin(Stdio::null());
+    child.stdout(Stdio::piped());
+    child.stderr(Stdio::inherit());
+    child.kill_on_drop(true);
+    child.env("CODEX_HOME", codex_home.path());
+    child.envs(env);
+    let mut child = child.spawn()?;
+
+    let (websocket_url, fingerprint_hex) = read_wss_listen_info_from_stdout(&mut child).await?;
+    Ok(SpawnedWssServer {
+        child,
+        websocket_url,
+        fingerprint_hex,
+        _codex_home: codex_home,
+        _helper_paths: helper_paths,
+    })
+}
+
 pub(crate) async fn exec_server_with_env<I, K, V>(env: I) -> anyhow::Result<ExecServerHarness>
 where
     I: IntoIterator<Item = (K, V)>,
@@ -388,6 +460,44 @@ async fn read_listen_url_from_stdout(child: &mut Child) -> anyhow::Result<String
         let listen_url = line.trim();
         if listen_url.starts_with("ws://") {
             return Ok(listen_url.to_string());
+        }
+    }
+}
+
+/// Reads the `wss://` listen URL and the `pinned-sha256:` certificate
+/// fingerprint that the TLS listener prints on stdout.
+#[allow(dead_code)]
+async fn read_wss_listen_info_from_stdout(child: &mut Child) -> anyhow::Result<(String, String)> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture exec-server stdout"))?;
+    let mut lines = BufReader::new(stdout).lines();
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+
+    let mut websocket_url: Option<String> = None;
+    let mut fingerprint: Option<String> = None;
+
+    loop {
+        if let (Some(url), Some(fp)) = (&websocket_url, &fingerprint) {
+            return Ok((url.clone(), fp.clone()));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(anyhow!(
+                "timed out waiting for exec-server wss listen info on stdout after {CONNECT_TIMEOUT:?}"
+            ));
+        }
+        let remaining = deadline.duration_since(now);
+        let line = timeout(remaining, lines.next_line())
+            .await
+            .map_err(|_| anyhow!("timed out waiting for exec-server stdout"))??
+            .ok_or_else(|| anyhow!("exec-server stdout closed before emitting wss listen info"))?;
+        let trimmed = line.trim();
+        if let Some(fp) = trimmed.strip_prefix("pinned-sha256:") {
+            fingerprint = Some(fp.trim().to_string());
+        } else if trimmed.starts_with("wss://") {
+            websocket_url = Some(trimmed.to_string());
         }
     }
 }

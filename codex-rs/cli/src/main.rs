@@ -566,9 +566,19 @@ struct ExecServerCommand {
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
 
-    /// Transport endpoint URL. Supported values: `ws://IP:PORT` (default), `stdio`, `stdio://`.
+    /// Transport endpoint URL. Supported values: `ws://IP:PORT` (default),
+    /// `wss://IP:PORT` (TLS with a self-signed certificate; the SHA-256
+    /// fingerprint is printed at startup for client pinning), `stdio`,
+    /// `stdio://`.
     #[arg(long = "listen", value_name = "URL", conflicts_with = "remote")]
     listen: Option<String>,
+
+    /// Require this bearer token on incoming WebSocket connections. When set,
+    /// every client must send `Authorization: Bearer <token>`. Overrides the
+    /// `CODEX_EXEC_SERVER_AUTH_TOKEN` environment variable. Applies to both the
+    /// `--listen ws://...` and `--listen wss://...` transports.
+    #[arg(long = "auth-token", value_name = "TOKEN", conflicts_with = "remote")]
+    auth_token: Option<String>,
 
     /// Register this exec-server as a remote environment using the given base URL.
     #[arg(long = "remote", value_name = "URL", requires = "environment_id")]
@@ -1719,6 +1729,18 @@ async fn run_exec_server_command(
         let _otel = exec_server_telemetry::init(config.as_ref())
             .inspect_err(|err| eprintln!("Could not create otel exporter: {err}"))
             .ok();
+        if let Some(token) = cmd.auth_token.as_deref()
+            && !token.is_empty()
+        {
+            // SAFETY: set before the websocket listener spawns any threads that
+            // read this variable; exec-server reads it once at startup.
+            unsafe {
+                std::env::set_var(
+                    codex_exec_server::CODEX_EXEC_SERVER_AUTH_TOKEN_ENV_VAR,
+                    token,
+                );
+            }
+        }
         let listen_url = cmd
             .listen
             .as_deref()

@@ -159,7 +159,7 @@ fn exec_server_env_for_request(
     }
 }
 
-fn exec_server_params_for_request(
+pub(crate) fn exec_server_params_for_request(
     process_id: i32,
     request: &ExecRequest,
     tty: bool,
