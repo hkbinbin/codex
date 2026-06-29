@@ -39,8 +39,7 @@ fn connect_args(
 /// an RPC (proving the encrypted JSON-RPC channel works end to end).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wss_client_with_matching_fingerprint_connects() -> Result<()> {
-    let mut server =
-        spawn_exec_server_wss([("CODEX_EXEC_SERVER_AUTH_TOKEN", TEST_TOKEN)]).await?;
+    let mut server = spawn_exec_server_wss([("CODEX_EXEC_SERVER_AUTH_TOKEN", TEST_TOKEN)]).await?;
     let fingerprint = parse_fingerprint_hex(&server.fingerprint_hex)?;
 
     let client = ExecServerClient::connect_websocket(connect_args(
@@ -62,8 +61,7 @@ async fn wss_client_with_matching_fingerprint_connects() -> Result<()> {
 /// connecting to an unexpected server.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wss_client_with_wrong_fingerprint_is_rejected() -> Result<()> {
-    let mut server =
-        spawn_exec_server_wss([("CODEX_EXEC_SERVER_AUTH_TOKEN", TEST_TOKEN)]).await?;
+    let mut server = spawn_exec_server_wss([("CODEX_EXEC_SERVER_AUTH_TOKEN", TEST_TOKEN)]).await?;
 
     // Flip one byte of the real fingerprint to simulate a mismatched pin.
     let mut wrong = parse_fingerprint_hex(&server.fingerprint_hex)?;
@@ -77,7 +75,11 @@ async fn wss_client_with_wrong_fingerprint_is_rejected() -> Result<()> {
     .await;
 
     match result {
-        Ok(_) => return Err(anyhow!("connection with mismatched fingerprint should fail")),
+        Ok(_) => {
+            return Err(anyhow!(
+                "connection with mismatched fingerprint should fail"
+            ));
+        }
         Err(_) => {}
     }
 
@@ -90,8 +92,7 @@ async fn wss_client_with_wrong_fingerprint_is_rejected() -> Result<()> {
 /// independent and both enforced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wss_client_without_token_is_rejected() -> Result<()> {
-    let mut server =
-        spawn_exec_server_wss([("CODEX_EXEC_SERVER_AUTH_TOKEN", TEST_TOKEN)]).await?;
+    let mut server = spawn_exec_server_wss([("CODEX_EXEC_SERVER_AUTH_TOKEN", TEST_TOKEN)]).await?;
     let fingerprint = parse_fingerprint_hex(&server.fingerprint_hex)?;
 
     let result = ExecServerClient::connect_websocket(connect_args(

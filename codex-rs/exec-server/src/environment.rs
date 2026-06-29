@@ -37,8 +37,7 @@ pub const CODEX_EXEC_SERVER_AUTH_TOKEN_ENV_VAR: &str = "CODEX_EXEC_SERVER_AUTH_T
 /// connecting over `wss://`. When set, the client authenticates the server by
 /// this fingerprint instead of system root CAs, enabling self-signed,
 /// reverse-proxy-free end-to-end encryption.
-pub const CODEX_EXEC_SERVER_TLS_PINNED_SHA256_ENV_VAR: &str =
-    "CODEX_EXEC_SERVER_TLS_PINNED_SHA256";
+pub const CODEX_EXEC_SERVER_TLS_PINNED_SHA256_ENV_VAR: &str = "CODEX_EXEC_SERVER_TLS_PINNED_SHA256";
 pub const CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR: &str =
     "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL";
 pub const CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID_ENV_VAR: &str =

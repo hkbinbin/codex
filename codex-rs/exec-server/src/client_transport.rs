@@ -208,8 +208,13 @@ impl ExecServerClient {
                 let connector = tokio_tungstenite::Connector::Rustls(
                     crate::tls::build_pinned_client_config(fingerprint),
                 );
-                connect_async_tls_with_config(request, None, /*disable_nagle*/ false, Some(connector))
-                    .boxed()
+                connect_async_tls_with_config(
+                    request,
+                    None,
+                    /*disable_nagle*/ false,
+                    Some(connector),
+                )
+                .boxed()
             }
             None => connect_async(request).boxed(),
         };
@@ -373,13 +378,12 @@ fn build_websocket_request(
 ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, ExecServerError> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-    let mut request =
-        websocket_url
-            .into_client_request()
-            .map_err(|source| ExecServerError::WebSocketConnect {
-                url: websocket_url.to_string(),
-                source,
-            })?;
+    let mut request = websocket_url.into_client_request().map_err(|source| {
+        ExecServerError::WebSocketConnect {
+            url: websocket_url.to_string(),
+            source,
+        }
+    })?;
 
     if let Some(token) = auth_token {
         let header_value = format!("Bearer {token}");

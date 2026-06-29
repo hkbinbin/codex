@@ -28,11 +28,7 @@ use tokio::time::timeout;
 /// platform's default shell.
 fn echo_command(text: &str) -> Vec<String> {
     if cfg!(windows) {
-        vec![
-            "cmd".to_string(),
-            "/C".to_string(),
-            format!("echo {text}"),
-        ]
+        vec!["cmd".to_string(), "/C".to_string(), format!("echo {text}")]
     } else {
         vec![
             "/bin/sh".to_string(),
@@ -80,7 +76,11 @@ async fn drain(started: StartedExecProcess) -> Result<(String, String, Option<i3
             sandbox_denied: _,
         } = timeout(
             Duration::from_secs(10),
-            process.read(after_seq, /*max_bytes*/ None, /*wait_ms*/ Some(500)),
+            process.read(
+                after_seq,
+                /*max_bytes*/ None,
+                /*wait_ms*/ Some(500),
+            ),
         )
         .await
         .map_err(|_| anyhow!("timed out reading remote process output"))??;
@@ -108,7 +108,11 @@ async fn drain(started: StartedExecProcess) -> Result<(String, String, Option<i3
     Ok((stdout, stderr, exit_code))
 }
 
-async fn start(environment: &Environment, process_id: &str, argv: Vec<String>) -> Result<StartedExecProcess> {
+async fn start(
+    environment: &Environment,
+    process_id: &str,
+    argv: Vec<String>,
+) -> Result<StartedExecProcess> {
     environment
         .get_exec_backend()
         .start(ExecParams {
