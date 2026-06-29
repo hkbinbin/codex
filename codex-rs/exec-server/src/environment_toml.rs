@@ -38,6 +38,14 @@ struct EnvironmentsToml {
 struct EnvironmentToml {
     id: String,
     url: Option<String>,
+    /// Bearer token sent to a `wss://`/`ws://` exec-server. When omitted, the
+    /// value falls back to `CODEX_EXEC_SERVER_AUTH_TOKEN` so existing
+    /// environment-variable setups keep working.
+    auth_token: Option<String>,
+    /// Pinned server-certificate SHA-256 fingerprint (lowercase hex, no
+    /// separators) for `wss://` connections. When omitted, the value falls back
+    /// to `CODEX_EXEC_SERVER_TLS_PINNED_SHA256`.
+    tls_pinned_sha256: Option<String>,
     program: Option<String>,
     args: Option<Vec<String>>,
     env: Option<HashMap<String, String>>,
@@ -126,6 +134,8 @@ fn parse_environment_toml(
     let EnvironmentToml {
         id,
         url,
+        auth_token,
+        tls_pinned_sha256,
         program,
         args,
         env,
@@ -144,6 +154,11 @@ fn parse_environment_toml(
             "environment `{id}` connect_timeout_sec requires url"
         )));
     }
+    if url.is_none() && (auth_token.is_some() || tls_pinned_sha256.is_some()) {
+        return Err(ExecServerError::Protocol(format!(
+            "environment `{id}` auth_token and tls_pinned_sha256 require url"
+        )));
+    }
 
     let connect_timeout = connect_timeout_sec.unwrap_or(DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT);
     let initialize_timeout =
@@ -152,12 +167,25 @@ fn parse_environment_toml(
     let transport_params = match (url, program) {
         (Some(url), None) => {
             let url = validate_websocket_url(url)?;
+            // Per-environment credentials win; fall back to the process-wide
+            // environment variables so existing setups keep working.
+            let auth_token = auth_token.or_else(crate::environment::auth_token_from_env);
+            let tls_pinned_sha256 = match tls_pinned_sha256 {
+                Some(value) => {
+                    Some(crate::tls::parse_fingerprint_hex(&value).map_err(|error| {
+                        ExecServerError::Protocol(format!(
+                            "environment `{id}` has an invalid tls_pinned_sha256: {error}"
+                        ))
+                    })?)
+                }
+                None => crate::environment::tls_pinned_sha256_from_env(),
+            };
             ExecServerTransportParams::WebSocketUrl {
                 websocket_url: url,
                 connect_timeout,
                 initialize_timeout,
-                auth_token: crate::environment::auth_token_from_env(),
-                tls_pinned_sha256: crate::environment::tls_pinned_sha256_from_env(),
+                auth_token,
+                tls_pinned_sha256,
             }
         }
         (None, Some(program)) => {
@@ -658,6 +686,74 @@ mod tests {
             }
         );
         assert_eq!(*initialize_timeout, Duration::from_secs(56));
+    }
+
+    #[test]
+    fn toml_provider_parses_per_environment_credentials() {
+        let fingerprint_hex = "a".repeat(64);
+        let expected_fingerprint = crate::tls::parse_fingerprint_hex(&fingerprint_hex)
+            .expect("fingerprint hex should parse");
+        let provider = TomlEnvironmentProvider::new(EnvironmentsToml {
+            default: None,
+            include_local: None,
+            environments: vec![EnvironmentToml {
+                id: "devbox".to_string(),
+                url: Some("wss://example.com:8911".to_string()),
+                auth_token: Some("secret-token".to_string()),
+                tls_pinned_sha256: Some(fingerprint_hex),
+                ..Default::default()
+            }],
+        })
+        .expect("provider");
+
+        let ExecServerTransportParams::WebSocketUrl {
+            auth_token,
+            tls_pinned_sha256,
+            ..
+        } = &provider.environments[0].1
+        else {
+            panic!("expected websocket transport");
+        };
+        assert_eq!(auth_token.as_deref(), Some("secret-token"));
+        assert_eq!(*tls_pinned_sha256, Some(expected_fingerprint));
+    }
+
+    #[test]
+    fn toml_provider_rejects_invalid_fingerprint() {
+        let err = TomlEnvironmentProvider::new(EnvironmentsToml {
+            default: None,
+            include_local: None,
+            environments: vec![EnvironmentToml {
+                id: "devbox".to_string(),
+                url: Some("wss://example.com:8911".to_string()),
+                tls_pinned_sha256: Some("not-a-valid-fingerprint".to_string()),
+                ..Default::default()
+            }],
+        })
+        .expect_err("invalid fingerprint should be rejected");
+        assert!(
+            err.to_string().contains("invalid tls_pinned_sha256"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn toml_provider_rejects_credentials_without_url() {
+        let err = TomlEnvironmentProvider::new(EnvironmentsToml {
+            default: None,
+            include_local: None,
+            environments: vec![EnvironmentToml {
+                id: "ssh-dev".to_string(),
+                program: Some("ssh".to_string()),
+                auth_token: Some("secret-token".to_string()),
+                ..Default::default()
+            }],
+        })
+        .expect_err("credentials without url should be rejected");
+        assert!(
+            err.to_string().contains("require url"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

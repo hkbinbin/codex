@@ -50,16 +50,40 @@ pinned-sha256: <64位十六进制指纹>
 
 ## 二、客户端连接（我来做 / 你也可本地做）
 
-客户端设三个环境变量后跑 `codex exec`：
+客户端有两种配置方式，**推荐用配置文件**，省去每次输环境变量、重启换指纹也只改一处。
+
+### 方式 A（推荐）：写 `$CODEX_HOME/environments.toml`
+
+`$CODEX_HOME` 默认是 `~/.codex`（Windows 为 `C:\Users\<你>\.codex`）。新建/编辑 `environments.toml`：
+```toml
+default = "devbox"          # 让 codex 默认就用这个远程环境
+
+[[environments]]
+id  = "devbox"
+url = "wss://<你的公网IP>:8911"
+auth_token        = "你的强随机token"
+tls_pinned_sha256 = "<server 启动打印的指纹>"
+```
+然后直接跑，无需任何环境变量：
 ```powershell
-$env:CODEX_EXEC_SERVER_URL          = "wss://<你的公网IP>:8911"
-$env:CODEX_EXEC_SERVER_AUTH_TOKEN   = "你的强随机token"
+.\codex.exe exec --skip-git-repo-check --sandbox danger-full-access "你的任务"
+```
+> 重启 server 后指纹会变 → 只需改 `environments.toml` 里的 `tls_pinned_sha256` 一行。
+> 多台远程机各写一个 `[[environments]]` 块即可，凭据互不影响。
+
+### 方式 B（备用）：环境变量
+
+```powershell
+$env:CODEX_EXEC_SERVER_URL               = "wss://<你的公网IP>:8911"
+$env:CODEX_EXEC_SERVER_AUTH_TOKEN        = "你的强随机token"
 $env:CODEX_EXEC_SERVER_TLS_PINNED_SHA256 = "<你发我的指纹>"
 
 .\codex.exe exec --skip-git-repo-check --sandbox danger-full-access "你的任务"
 ```
+> 注意：一旦存在 `environments.toml`，`CODEX_EXEC_SERVER_URL` 不再被读取（走文件方式）。
+> 在 `environments.toml` 中省略 `auth_token` / `tls_pinned_sha256` 时，会回退到对应的环境变量，方便混用。
 
-连接流程：
+连接流程（两种方式相同）：
 1. client 用指纹锁定校验 server 自签证书（防中间人）。
 2. 用 token 通过 `Authorization: Bearer` 鉴权。
 3. 之后所有命令/输出/文件经 wss 加密信道下发到 **server 上执行**。
@@ -89,7 +113,7 @@ $env:CODEX_EXEC_SERVER_TLS_PINNED_SHA256 = "<你发我的指纹>"
 | 现象 | 原因 / 解决 |
 |---|---|
 | client 报连接超时 | 防火墙/安全组没放行 8911，或 IP/端口写错 |
-| client 报证书指纹不匹配 | server 重启过，指纹变了 → 用新指纹 |
+| client 报证书指纹不匹配 | server 重启过，指纹变了 → 改 `environments.toml` 的 `tls_pinned_sha256`（或环境变量） |
 | client 报 401 | token 不一致 |
 | 模型说 "no shell tool available" | client 没连上 server（URL/token/指纹任一错）→ 退化成无执行能力 |
 | server 日志 "running WITHOUT authentication" | 你没传 `--auth-token`，公网严禁，请加上 |
