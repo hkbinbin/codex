@@ -723,8 +723,9 @@ fn maybe_emit_output_delta(
     };
     let protocol_stream = match stream {
         codex_exec_server::ExecOutputStream::Stderr => ExecOutputStream::Stderr,
-        codex_exec_server::ExecOutputStream::Stdout
-        | codex_exec_server::ExecOutputStream::Pty => ExecOutputStream::Stdout,
+        codex_exec_server::ExecOutputStream::Stdout | codex_exec_server::ExecOutputStream::Pty => {
+            ExecOutputStream::Stdout
+        }
     };
     let event = Event {
         id: stdout_stream.sub_id.clone(),
@@ -736,7 +737,6 @@ fn maybe_emit_output_delta(
     };
     let _ = stdout_stream.tx_event.try_send(event);
 }
-
 
 #[allow(clippy::too_many_arguments)]
 async fn get_raw_output_result(

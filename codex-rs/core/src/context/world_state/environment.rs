@@ -78,7 +78,10 @@ impl WorldStateSection for EnvironmentsState {
                     (
                         id.clone(),
                         EnvironmentSnapshot {
-                            cwd: environment.cwd.inferred_native_path_string(),
+                            cwd: environment
+                                .cwd
+                                .as_ref()
+                                .map(PathUri::inferred_native_path_string),
                             status: environment.status,
                             shell: environment.shell.clone(),
                         },
@@ -240,10 +243,12 @@ impl ContextualUserFragment for RenderedEnvironments {
 }
 
 fn push_environment_values(rendered: &mut String, environment: &EnvironmentState, indent: &str) {
-    rendered.push_str(indent);
-    rendered.push_str("<cwd>");
-    push_xml_escaped_text(rendered, &environment.cwd.inferred_native_path_string());
-    rendered.push_str("</cwd>\n");
+    if let Some(cwd) = &environment.cwd {
+        rendered.push_str(indent);
+        rendered.push_str("<cwd>");
+        push_xml_escaped_text(rendered, &cwd.inferred_native_path_string());
+        rendered.push_str("</cwd>\n");
+    }
     if environment.status == EnvironmentStatus::Starting {
         rendered.push_str(indent);
         rendered.push_str("<status>starting</status>\n");
@@ -271,7 +276,12 @@ fn push_optional_element(rendered: &mut String, name: &str, value: Option<&str>)
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EnvironmentState {
-    cwd: PathUri,
+    /// `None` for a remote environment that is still connecting: its real
+    /// server-side working directory is not known until the connection
+    /// resolves, and advertising the client-local path would mislead the model
+    /// into running commands against a directory that does not exist on the
+    /// server.
+    cwd: Option<PathUri>,
     status: EnvironmentStatus,
     shell: Option<String>,
 }
@@ -288,7 +298,7 @@ pub(crate) struct EnvironmentsSnapshot {
 
 #[derive(Deserialize, Serialize)]
 struct EnvironmentSnapshot {
-    cwd: String,
+    cwd: Option<String>,
     status: EnvironmentStatus,
     shell: Option<String>,
 }
@@ -320,7 +330,7 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
             (
                 environment.environment_id.clone(),
                 EnvironmentState {
-                    cwd: environment.cwd().clone(),
+                    cwd: Some(environment.cwd().clone()),
                     status: EnvironmentStatus::Available,
                     shell: environment
                         .shell
@@ -334,7 +344,14 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
         environments
             .entry(environment.selection.environment_id.clone())
             .or_insert_with(|| EnvironmentState {
-                cwd: environment.selection.cwd.clone(),
+                // A still-connecting remote environment has no usable cwd yet;
+                // omit it so the model does not latch onto the client-local
+                // path. Local environments can safely show their cwd.
+                cwd: if environment.is_remote {
+                    None
+                } else {
+                    Some(environment.selection.cwd.clone())
+                },
                 status: EnvironmentStatus::Starting,
                 shell: None,
             });

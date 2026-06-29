@@ -47,7 +47,10 @@ fn remote_shell_process_id_is_deterministic_and_positive() {
     let b = remote_shell_process_id_from_call_id("call-123");
     let c = remote_shell_process_id_from_call_id("call-456");
     assert_eq!(a, b, "same call id should map to the same process id");
-    assert_ne!(a, c, "different call ids should map to different process ids");
+    assert_ne!(
+        a, c,
+        "different call ids should map to different process ids"
+    );
     assert!(a >= 0, "process id must be non-negative");
     assert!(c >= 0, "process id must be non-negative");
 }

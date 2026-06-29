@@ -102,6 +102,34 @@ fn renders_only_changed_environments() -> Result<()> {
 }
 
 #[test]
+fn starting_remote_environment_omits_cwd() {
+    let mut world_state = WorldState::default();
+    world_state.add_section(EnvironmentsState {
+        environments: [("devbox".to_string(), starting_without_cwd())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    });
+
+    let rendered = render_fragments(world_state.render_full());
+    let text = match rendered.as_slice() {
+        [ResponseItem::Message { content, .. }] => match content.as_slice() {
+            [ContentItem::InputText { text }] => text.clone(),
+            other => panic!("unexpected content: {other:?}"),
+        },
+        other => panic!("unexpected fragments: {other:?}"),
+    };
+    assert!(
+        !text.contains("<cwd>"),
+        "starting remote environment must not advertise a cwd, got:\n{text}"
+    );
+    assert!(
+        text.contains("<status>starting</status>"),
+        "starting remote environment should still report its status, got:\n{text}"
+    );
+}
+
+#[test]
 fn persisted_turn_context_values_render_a_diff() -> Result<()> {
     let environments = EnvironmentsState {
         environments: [(
@@ -198,7 +226,7 @@ fn single_environment_diff_ignores_unknown_shell() -> Result<()> {
         environments: [(
             LOCAL_ENVIRONMENT_ID.to_string(),
             EnvironmentState {
-                cwd: PathUri::parse("file:///repo")?,
+                cwd: Some(PathUri::parse("file:///repo")?),
                 status: EnvironmentStatus::Available,
                 shell: None,
             },
@@ -256,7 +284,7 @@ fn removed_legacy_environment_renders_unavailable() -> Result<()> {
 
 fn available(cwd: &str, shell: &str) -> Result<EnvironmentState> {
     Ok(EnvironmentState {
-        cwd: PathUri::parse(cwd)?,
+        cwd: Some(PathUri::parse(cwd)?),
         status: EnvironmentStatus::Available,
         shell: Some(shell.to_string()),
     })
@@ -264,10 +292,21 @@ fn available(cwd: &str, shell: &str) -> Result<EnvironmentState> {
 
 fn starting(cwd: &str) -> Result<EnvironmentState> {
     Ok(EnvironmentState {
-        cwd: PathUri::parse(cwd)?,
+        cwd: Some(PathUri::parse(cwd)?),
         status: EnvironmentStatus::Starting,
         shell: None,
     })
+}
+
+/// A still-connecting remote environment whose server-side cwd is not yet
+/// known. It must render `<status>starting</status>` without a `<cwd>` line so
+/// the model never adopts the meaningless client-local path.
+fn starting_without_cwd() -> EnvironmentState {
+    EnvironmentState {
+        cwd: None,
+        status: EnvironmentStatus::Starting,
+        shell: None,
+    }
 }
 
 fn render_fragments(fragments: Vec<Box<dyn ContextualUserFragment>>) -> Vec<ResponseItem> {

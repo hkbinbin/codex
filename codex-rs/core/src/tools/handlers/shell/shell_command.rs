@@ -188,7 +188,11 @@ impl ShellCommandHandler {
                 turn_environment.cwd()
             ))
         })?;
-        let cwd = resolve_workdir_base_path(&arguments, &environment_cwd)?;
+        let cwd = resolve_workdir_base_path(
+            &arguments,
+            &environment_cwd,
+            turn_environment.environment.is_remote(),
+        )?;
         let params: ShellCommandToolCallParams = parse_arguments_with_base_path(&arguments, &cwd)?;
         maybe_emit_implicit_skill_invocation(
             session.as_ref(),

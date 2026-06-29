@@ -142,15 +142,27 @@ where
     parse_arguments(arguments)
 }
 
+/// Resolves the working directory for a tool call from the model-supplied
+/// `workdir` argument relative to the environment's `default_cwd`.
+///
+/// `remote` indicates the selected environment runs on a remote exec-server. In
+/// that case an *absolute* `workdir` supplied by the model is ignored: the model
+/// only ever sees client-local paths (e.g. from the workspace context), so an
+/// absolute path almost certainly points at a directory that does not exist on
+/// the server. Falling back to `default_cwd` (the mirrored remote workspace)
+/// keeps remote execution working instead of failing with "no such directory".
+/// Relative workdirs are still honored and joined onto the remote base.
 fn resolve_workdir_base_path(
     arguments: &str,
     default_cwd: &AbsolutePathBuf,
+    remote: bool,
 ) -> Result<AbsolutePathBuf, FunctionCallError> {
     let arguments: Value = parse_arguments(arguments)?;
     Ok(arguments
         .get("workdir")
         .and_then(Value::as_str)
         .filter(|workdir| !workdir.is_empty())
+        .filter(|workdir| !(remote && Path::new(workdir).is_absolute()))
         .map_or_else(|| default_cwd.clone(), |workdir| default_cwd.join(workdir)))
 }
 

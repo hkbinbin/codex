@@ -32,7 +32,7 @@ fn environment(id: &str, cwd: PathUri, shell: impl Into<String>) -> (String, Env
     (
         id.to_string(),
         EnvironmentState {
-            cwd,
+            cwd: Some(cwd),
             status: EnvironmentStatus::Available,
             shell: Some(shell.into()),
         },

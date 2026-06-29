@@ -86,7 +86,11 @@ $env:CODEX_EXEC_SERVER_TLS_PINNED_SHA256 = "<你发我的指纹>"
 连接流程（两种方式相同）：
 1. client 用指纹锁定校验 server 自签证书（防中间人）。
 2. 用 token 通过 `Authorization: Bearer` 鉴权。
-3. 之后所有命令/输出/文件经 wss 加密信道下发到 **server 上执行**。
+3. **工作区初始化**：client 首次解析远程环境时，会在 server 的工作目录下自动新建一个 `codex-workspace-<名字>-<哈希>` 目录，并把本地工作区文件递归同步过去（自动跳过 `.git`/`node_modules`/`target`/`dist`/`build` 等大目录及 >25MB 的大文件）。之后该远端目录作为命令的 `cwd`。
+4. 之后所有命令/输出/文件经 wss 加密信道下发到 **server 上执行**。
+
+> 你无需关心“远端要先有哪个目录”：client 会自动在 server 上建好工作区并拷贝本地文件。同一本地工作区路径每次映射到同一远端目录，便于复用。
+
 
 ---
 

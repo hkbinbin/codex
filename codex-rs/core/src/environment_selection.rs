@@ -38,12 +38,19 @@ type TurnEnvironmentResolution = Shared<BoxFuture<'static, TurnEnvironmentResult
 #[derive(Clone)]
 struct SelectedTurnEnvironment {
     selection: TurnEnvironmentSelection,
+    /// Whether the selected environment is remote. Used to avoid advertising a
+    /// client-local `cwd` to the model while a remote environment is still
+    /// connecting (its real, server-side `cwd` is only known once resolved).
+    is_remote: bool,
     resolution: TurnEnvironmentResolution,
 }
 
 #[derive(Clone)]
 pub(crate) struct StartingTurnEnvironment {
     pub(crate) selection: TurnEnvironmentSelection,
+    /// Whether this still-starting environment is remote (see
+    /// [`SelectedTurnEnvironment::is_remote`]).
+    pub(crate) is_remote: bool,
     resolution: TurnEnvironmentResolution,
 }
 
@@ -85,10 +92,12 @@ impl ThreadEnvironments {
             .into_iter()
             .map(|environment| {
                 let selection = environment.selection();
+                let is_remote = environment.environment.is_remote();
                 let resolution: TurnEnvironmentResolution =
                     futures::future::ready(Ok(environment)).boxed().shared();
                 SelectedTurnEnvironment {
                     selection,
+                    is_remote,
                     resolution,
                 }
             })
@@ -124,6 +133,7 @@ impl ThreadEnvironments {
                 tracing::warn!("skipping unknown turn environment `{environment_id}`");
                 continue;
             };
+            let is_remote = environment.is_remote();
             let (resolution_task, resolution) = Self::resolve_environment(
                 selected_environment.clone(),
                 environment,
@@ -135,6 +145,7 @@ impl ThreadEnvironments {
             let resolution = resolution.boxed().shared();
             next.push(SelectedTurnEnvironment {
                 selection: selected_environment.clone(),
+                is_remote,
                 resolution,
             });
         }
@@ -153,29 +164,60 @@ impl ThreadEnvironments {
                 tracing::warn!("turn environment `{environment_id}` failed to start: {err}");
                 return Err(Arc::new(err));
             }
-            let shell = if environment.is_remote() {
+            // For remote environments, resolve the shell and mirror the local
+            // workspace onto the server so the turn has a valid server-side
+            // `cwd`. Local environments keep the caller-provided cwd verbatim.
+            let (shell, cwd) = if environment.is_remote() {
                 match environment.info().await {
-                    Ok(info) => match Shell::from_environment_shell_info(info.shell) {
-                        Ok(shell) => Some(shell),
-                        Err(err) => {
-                            tracing::warn!(
-                                "failed to resolve shell for environment `{environment_id}`: {err}"
-                            );
-                            None
-                        }
-                    },
+                    Ok(info) => {
+                        let shell = match Shell::from_environment_shell_info(info.shell) {
+                            Ok(shell) => Some(shell),
+                            Err(err) => {
+                                tracing::warn!(
+                                    "failed to resolve shell for environment `{environment_id}`: {err}"
+                                );
+                                None
+                            }
+                        };
+                        let cwd = match info.cwd.as_ref() {
+                            Some(server_cwd) => {
+                                match crate::remote_workspace::initialize_remote_workspace(
+                                    &environment,
+                                    server_cwd,
+                                    &selection.cwd,
+                                )
+                                .await
+                                {
+                                    Ok(remote_cwd) => remote_cwd,
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            "failed to initialize remote workspace for `{environment_id}`: {err}"
+                                        );
+                                        return Err(Arc::new(err));
+                                    }
+                                }
+                            }
+                            None => {
+                                tracing::warn!(
+                                    "remote environment `{environment_id}` did not report a working directory; using local cwd"
+                                );
+                                selection.cwd.clone()
+                            }
+                        };
+                        (shell, cwd)
+                    }
                     Err(err) => {
                         tracing::warn!(
                             "failed to get info for environment `{environment_id}`: {err}"
                         );
-                        None
+                        (None, selection.cwd.clone())
                     }
                 }
             } else {
-                Some(local_shell)
+                (Some(local_shell), selection.cwd.clone())
             };
             let mut turn_environment =
-                TurnEnvironment::new(selection.environment_id, environment, selection.cwd, shell);
+                TurnEnvironment::new(selection.environment_id, environment, cwd, shell);
             let task = shell_snapshot
                 .build(turn_environment.clone())
                 .boxed()
@@ -205,6 +247,7 @@ impl ThreadEnvironments {
                 ),
                 None => starting.push(StartingTurnEnvironment {
                     selection: environment.selection.clone(),
+                    is_remote: environment.is_remote,
                     resolution: environment.resolution.clone(),
                 }),
             }
