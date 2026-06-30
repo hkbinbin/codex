@@ -7,9 +7,12 @@
 //! into a fresh directory on the server when the environment is first resolved,
 //! and then uses that server-side directory as the `cwd` for the turn.
 //!
-//! The mirror is intentionally shallow on cost: large build/VCS directories are
-//! skipped and very large files are not uploaded, so a typical workspace syncs
-//! quickly without shipping multi-gigabyte build artifacts over the wire.
+//! The mirror is a complete 1:1 copy of the local working directory: every
+//! file and subdirectory is uploaded verbatim, including VCS metadata such as
+//! `.git`. Nothing is filtered out by name or size, so the remote workspace is
+//! an exact replica of the local one. Only symlinks and other non-regular files
+//! are skipped, because the remote filesystem API can only create directories
+//! and write file contents.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -19,29 +22,6 @@ use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::Environment;
 use codex_exec_server::ExecServerError;
 use codex_utils_path_uri::PathUri;
-
-/// Directory names that are never uploaded to the remote workspace. These are
-/// large, machine-specific, or regenerable, so copying them would be slow and
-/// pointless.
-const SKIPPED_DIR_NAMES: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    "dist",
-    "build",
-    ".venv",
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-];
-
-/// Files larger than this are skipped to avoid shipping huge binaries/artifacts
-/// over the connection during workspace initialization.
-const MAX_UPLOAD_FILE_BYTES: u64 = 25 * 1024 * 1024;
-
-/// Caps the total number of filesystem entries visited so a pathological
-/// workspace cannot stall turn startup indefinitely.
-const MAX_ENTRIES: usize = 50_000;
 
 /// Mirrors `local_cwd` into a fresh directory on the remote `environment` and
 /// returns the remote workspace directory as a [`PathUri`].
@@ -86,7 +66,6 @@ pub(crate) async fn initialize_remote_workspace(
 
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
     queue.push_back(local_root.clone());
-    let mut visited = 0usize;
 
     while let Some(dir) = queue.pop_front() {
         let entries = match std::fs::read_dir(&dir) {
@@ -108,13 +87,6 @@ pub(crate) async fn initialize_remote_workspace(
                     continue;
                 }
             };
-            visited += 1;
-            if visited > MAX_ENTRIES {
-                tracing::warn!(
-                    "remote workspace: exceeded {MAX_ENTRIES} entries; remaining files were not uploaded"
-                );
-                return Ok(remote_root);
-            }
 
             let path = entry.path();
             let file_type = match entry.file_type() {
@@ -127,9 +99,6 @@ pub(crate) async fn initialize_remote_workspace(
                     continue;
                 }
             };
-
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
 
             let Some(relative) = path
                 .strip_prefix(&local_root)
@@ -149,9 +118,6 @@ pub(crate) async fn initialize_remote_workspace(
             };
 
             if file_type.is_dir() {
-                if SKIPPED_DIR_NAMES.contains(&name.as_ref()) {
-                    continue;
-                }
                 if let Err(err) = filesystem
                     .create_directory(
                         &remote_path,
@@ -167,15 +133,6 @@ pub(crate) async fn initialize_remote_workspace(
                 }
                 queue.push_back(path);
             } else if file_type.is_file() {
-                if let Ok(metadata) = entry.metadata()
-                    && metadata.len() > MAX_UPLOAD_FILE_BYTES
-                {
-                    tracing::debug!(
-                        "remote workspace: skipping large file `{relative}` ({} bytes)",
-                        metadata.len()
-                    );
-                    continue;
-                }
                 let contents = match std::fs::read(&path) {
                     Ok(contents) => contents,
                     Err(err) => {
